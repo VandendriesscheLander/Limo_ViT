@@ -1,0 +1,4 @@
+Videomae kind of works, but bad results, needs a different model most likely.
+
+Xclip does not want to work on python 3.8, difficult to get python 3.11 working even using conda.
+

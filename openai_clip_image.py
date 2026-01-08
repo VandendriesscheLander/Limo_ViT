@@ -125,7 +125,7 @@ def process_frame_with_clip(frame_rgb):
         
         with output_lock:
             if is_danger:
-                if conf > 0.2:
+                if conf > 0.3:
                     latest_status = "INTERCEPT"
                     latest_action = f"DANGER: {top_label.replace('a photo of ', '')}"
                 else:
