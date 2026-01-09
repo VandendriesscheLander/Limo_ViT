@@ -49,7 +49,8 @@ print(f"Loading VLA ({MODEL_ID}) to {DEVICE}...")
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID, 
     trust_remote_code=True, 
-    revision=REVISION
+    revision=REVISION,
+    torch_dtype=torch.float16
 ).to(DEVICE)
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, revision=REVISION)
 print("System Ready.")

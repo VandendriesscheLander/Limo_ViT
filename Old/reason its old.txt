@@ -1,4 +1,6 @@
 Videomae kind of works, but bad results, needs a different model most likely.
 
-Xclip does not want to work on python 3.8, difficult to get python 3.11 working even using conda.
+Moondream is way too large, and doesnt work for the jetson orin nano, maybe try quantization
+
+florence 2 is also pretty big even with fp16, maybe int8 or int4 could work better.
 
