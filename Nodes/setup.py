@@ -1,6 +1,6 @@
 from setuptools import setup
 
-package_name = 'PatrolBot'
+package_name = 'PatrolBotgit'
 
 setup(
     name=package_name,
