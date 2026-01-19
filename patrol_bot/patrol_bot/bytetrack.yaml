@@ -1,0 +1,6 @@
+tracker_type: bytetrack 
+track_high_thresh: 0.5  # Threshold for the first association
+track_low_thresh: 0.1   # Threshold for the second association
+new_track_thresh: 0.6   # Threshold for init a new track
+track_buffer: 150        # Increased from 30 to 150 (5 seconds of memory)
+match_thresh: 0.8       # Threshold for matching tracks
