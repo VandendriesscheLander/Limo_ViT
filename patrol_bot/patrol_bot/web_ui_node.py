@@ -10,6 +10,12 @@ from flask import Flask, Response, render_template_string, jsonify
 import json
 import time
 import numpy as np
+from collections import deque
+
+try:
+    from limo_msgs.msg import LimoStatus
+except ImportError:
+    LimoStatus = None
 
 # --- Flask App Setup ---
 app = Flask(__name__)
@@ -18,6 +24,15 @@ app = Flask(__name__)
 latest_frame = None
 latest_status = {"status": "Waiting for data..."}
 latest_tracks = []
+latest_battery = {
+    "voltage": 0.0, 
+    "percentage": 0.0, 
+    "status": "Unknown",
+    "discharge_rate": 0.0,
+    "runtime_remaining": "Calculating..."
+}
+voltage_history = deque(maxlen=600)  # Store (timestamp, voltage)
+
 current_fps = 0.0
 last_fps_time = time.time()
 frame_count = 0
@@ -82,6 +97,18 @@ HTML_TEMPLATE = """
                     }
                     document.getElementById('metrics-status').innerHTML = metricsHtml;
 
+                    // Update Battery - ADDED
+                    let batteryHtml = `<h3>🔋 Battery</h3>`;
+                    if (data.battery && data.battery.status !== "Unknown") {
+                        let color = data.battery.percentage > 20 ? 'lightgreen' : 'red';
+                        batteryHtml += `<p style='color:${color}; font-size: 1.5em;'>${data.battery.percentage}% (${data.battery.voltage}V)</p>`;
+                        batteryHtml += `<p>Est. Runtime: <b>${data.battery.runtime_remaining}</b></p>`;
+                        batteryHtml += `<p style='font-size:0.8em; color:#aaa'>Drop Rate: ${data.battery.discharge_rate} V/min</p>`;
+                    } else {
+                        batteryHtml += `<p>waiting for LIMO status...</p>`;
+                    }
+                    document.getElementById('battery-status').innerHTML = batteryHtml;
+
                     // Update Tracking Info
                     let trackHtml = "<h3>👁️ Tracking (" + (data.tracks ? data.tracks.length : 0) + " people)</h3>";
                     trackHtml += "<pre>" + JSON.stringify(data.tracks, null, 2) + "</pre>";
@@ -100,6 +127,7 @@ HTML_TEMPLATE = """
         <div>
             <div id="brain-status" class="info-box"><h3>🧠 Brain Status</h3><p>Waiting...</p></div>
             <div id="metrics-status" class="info-box"><h3>📊 Metrics</h3><p>Waiting...</p></div>
+            <div id="battery-status" class="info-box"><h3>🔋 Battery</h3><p>Waiting...</p></div>
             <div id="track-status" class="info-box"><h3>👁️ Tracking</h3><p>Waiting...</p></div>
         </div>
     </div>
@@ -133,7 +161,7 @@ def video_feed():
 
 @app.route('/api/status')
 def api_status():
-    global latest_status, latest_tracks, current_fps, last_brain_update_time
+    global latest_status, latest_tracks, current_fps, last_brain_update_time, latest_battery
     with data_lock:
         status_to_send = latest_status
         # If no update for 5 seconds, say "Offline"
@@ -143,6 +171,7 @@ def api_status():
         return jsonify({
             "brain": status_to_send,
             "tracks": latest_tracks,
+            "battery": latest_battery,
             "fps": round(current_fps, 1)
         })
 
@@ -163,6 +192,14 @@ class WebUINode(Node):
         # Subscribe to Tracking Data
         self.subscription_tracks = self.create_subscription(
             String, '/tracked_persons', self.tracker_callback, 10)
+            
+        # Subscribe to Battery Status
+        if LimoStatus:
+            self.subscription_status = self.create_subscription(
+                LimoStatus, '/limo_status', self.status_callback, 10)
+            self.get_logger().info("Subscribed to /limo_status")
+        else:
+            self.get_logger().warn("LimoStatus message not found. Battery monitoring disabled.")
             
         self.get_logger().info("Web UI Node Started. Connect to http://<robot-ip>:5000")
 
@@ -202,6 +239,53 @@ class WebUINode(Node):
                 latest_tracks = data
         except ValueError:
             pass
+
+    def status_callback(self, msg):
+        global latest_battery, voltage_history
+        try:
+            current_time = time.time()
+            voltage = msg.battery_voltage
+            
+            # Simple Voltage -> Percentage (approximate for 3S LiPo)
+            # 12.6V = 100%, 10.0V = 0%
+            max_v = 12.6
+            min_v = 10.0
+            percentage = max(0, min(100, (voltage - min_v) / (max_v - min_v) * 100))
+            
+            # Store history
+            with data_lock:
+                voltage_history.append((current_time, voltage))
+                
+                # Calculate discharge rate and runtime
+                discharge_rate = 0.0
+                runtime_str = "Calculating..."
+                
+                # Check discharge rate every 30 seconds worth of data
+                if len(voltage_history) > 100: 
+                    # Calculate slope (voltage drop per minute)
+                    # We compare average of first 20 vs last 20 samples to smooth out noise
+                    start_avg = np.mean([v for t, v in list(voltage_history)[:20]])
+                    end_avg = np.mean([v for t, v in list(voltage_history)[-20:]])
+                    time_diff = voltage_history[-1][0] - voltage_history[0][0] # Seconds
+                    
+                    if time_diff > 10: 
+                        drop = start_avg - end_avg
+                        if drop > 0.01: # Significant drop
+                            discharge_rate = drop / (time_diff / 60.0) # Volts per minute
+                            minutes_left = (voltage - min_v) / discharge_rate
+                            runtime_str = f"{int(minutes_left)} min"
+                        else:
+                            runtime_str = "Stable (> 100h)"
+
+                latest_battery = {
+                    "voltage": round(voltage, 2),
+                    "percentage": int(percentage),
+                    "status": "Online",
+                    "discharge_rate": round(discharge_rate, 4),
+                    "runtime_remaining": runtime_str
+                }
+        except Exception as e:
+            self.get_logger().error(f"Error in battery callback: {e}")
 
 def run_flask():
     # Run Flask on all interfaces so we can access it from outside the robot

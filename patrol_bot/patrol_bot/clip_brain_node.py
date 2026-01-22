@@ -21,7 +21,8 @@ class ClipBrainNode(Node):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         self.confidence_threshold = 0.45 
-        self.inference_interval = 0.5 
+        self.inference_interval = 0.5
+        self.margin_factor = 0.3  # Add 30% padding around the person for context
 
         self.get_logger().info(f"Setting up on {self.device}")
         
@@ -77,12 +78,25 @@ class ClipBrainNode(Node):
         # --- ROS SETUP ---
         # Reduced queue size to 1 to prevent image buffering if GPU lags
         self.subscription = self.create_subscription(Image, '/debug_image', self.image_callback, 1)
+        
+        # NEW: Subscribe to the tracker node to get bounding boxes
+        self.tracker_sub = self.create_subscription(String, '/tracked_persons', self.tracker_callback, 10)
+        
         self.publisher = self.create_publisher(String, '/pursuit_target', 10)
         self.brain_ready_pub = self.create_publisher(Bool, '/brain_ready', 10)
+        
         self.bridge = CvBridge()
         self.last_run_time = 0
+        self.latest_tracked_persons = []
         
-        self.get_logger().info("Brain Node Ready (Offline + FP16 Mode).")
+        self.get_logger().info("Brain Node Ready (Per-Person Analysis Mode).")
+
+    def tracker_callback(self, msg):
+        """Update the latest known tracking data."""
+        try:
+            self.latest_tracked_persons = json.loads(msg.data)
+        except ValueError:
+            pass
 
     def image_callback(self, msg):
         ready_msg = Bool()
@@ -97,12 +111,42 @@ class ClipBrainNode(Node):
         try:
             cv_img = self.bridge.imgmsg_to_cv2(msg, "bgr8")
             rgb_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+            img_h, img_w, _ = rgb_img.shape
 
-            # 1. Process Image
-            image_inputs = self.processor(images=rgb_img, return_tensors="pt").to(self.device)
+            # 1. Prepare Crops (Per Person)
+            crops = []
+            crop_metadata = [] # Stores dicts with ID and other info per crop
 
-            # 2. Run Inference
-            # inference_mode() is slightly faster and safer for memory than no_grad()
+            # If we have tracked persons, crop them with margin
+            if self.latest_tracked_persons:
+                for person in self.latest_tracked_persons:
+                    cx, cy = person['center']
+                    w, h = person['size']
+                    
+                    # Calculate padding (to see the context/scenario)
+                    pad_w = w * self.margin_factor
+                    pad_h = h * self.margin_factor
+                    
+                    # Calculate coordinates with boundary checks
+                    x1 = int(max(0, cx - w/2 - pad_w))
+                    y1 = int(max(0, cy - h/2 - pad_h))
+                    x2 = int(min(img_w, cx + w/2 + pad_w))
+                    y2 = int(min(img_h, cy + h/2 + pad_h))
+                    
+                    if x2 > x1 and y2 > y1:
+                        crop = rgb_img[y1:y2, x1:x2]
+                        crops.append(crop)
+                        crop_metadata.append(person)
+
+            # Fallback: If no one is tracked, use the whole image (target_id=None)
+            if not crops:
+                crops.append(rgb_img)
+                crop_metadata.append({"id": None})
+
+            # 2. Batch Inference
+            # The processor can accept a list of images (crops)
+            image_inputs = self.processor(images=crops, return_tensors="pt").to(self.device)
+
             with torch.inference_mode():
                 outputs = self.model(
                     pixel_values=image_inputs['pixel_values'],
@@ -110,53 +154,65 @@ class ClipBrainNode(Node):
                     attention_mask=self.text_inputs.get('attention_mask')
                 )
                 
+                # logits_per_image shape: [batch_size, num_prompts]
                 logits_per_image = outputs.logits_per_image
-                probs = torch.sigmoid(logits_per_image)[0] 
+                probs_batch = torch.sigmoid(logits_per_image) 
 
-            # 3. Summing Scores
-            danger_score = probs[:len(self.danger_prompts)].sum().item()
-            safe_score = probs[len(self.danger_prompts):].sum().item()
+            # 3. Analyze Results per Crop
+            suspicious_found = []
+            safe_found = []
 
-            # 4. Decision Logic
-            if danger_score > safe_score and danger_score > self.confidence_threshold:
+            for i, probs in enumerate(probs_batch):
+                danger_score = probs[:len(self.danger_prompts)].sum().item()
+                safe_score = probs[len(self.danger_prompts):].sum().item()
                 
-                danger_probs = probs[:len(self.danger_prompts)]
-                top_idx = danger_probs.argmax().item()
-                specific_reason = self.danger_prompts[top_idx]
+                # Retrieve the ID associated with this crop
+                person_id = crop_metadata[i].get("id")
 
-                result = {
-                    "suspicious": True,
-                    "reason": specific_reason,
-                    "confidence": round(danger_score, 2),
-                    "target_id": None 
-                }
-                
-                self.get_logger().warn(f"DETECTED: {specific_reason} (Score: {danger_score:.2f})")
-                
+                if danger_score > safe_score and danger_score > self.confidence_threshold:
+                    
+                    danger_probs = probs[:len(self.danger_prompts)]
+                    top_idx = danger_probs.argmax().item()
+                    specific_reason = self.danger_prompts[top_idx]
+
+                    suspicious_found.append({
+                        "suspicious": True,
+                        "reason": specific_reason,
+                        "confidence": round(danger_score, 2),
+                        "target_id": person_id 
+                    })
+                else:
+                    safe_probs = probs[len(self.danger_prompts):]
+                    top_safe_idx = safe_probs.argmax().item()
+                    top_safe = self.safe_prompts[top_safe_idx]
+
+                    safe_found.append({
+                        "suspicious": False,
+                        "reason": top_safe,
+                        "confidence": round(safe_score, 2),
+                        "target_id": person_id
+                    })
+
+            # 4. Decision Logic: Prioritize Suspicious Events
+            final_result = None
+
+            if suspicious_found:
+                # If any person is suspicious, pick the one with highest confidence
+                final_result = max(suspicious_found, key=lambda x: x['confidence'])
+                self.get_logger().warn(f"DETECTED: {final_result['reason']} (ID: {final_result['target_id']})")
+            elif safe_found:
+                # If all are safe, pick the highest confidence safe result (or just the first one)
+                final_result = max(safe_found, key=lambda x: x['confidence'])
+                self.get_logger().info(f"Safe: {final_result['reason']} (ID: {final_result['target_id']})")
+
+            # 5. Publish
+            if final_result:
                 msg_out = String()
-                msg_out.data = json.dumps(result)
-                self.publisher.publish(msg_out)
-
-            else:
-                safe_probs = probs[len(self.danger_prompts):]
-                top_safe_idx = safe_probs.argmax().item()
-                top_safe = self.safe_prompts[top_safe_idx]
-                self.get_logger().info(f"Safe: {top_safe} (Safe: {safe_score:.2f} vs Danger: {danger_score:.2f})")
-
-                result = {
-                    "suspicious": False,
-                    "reason": top_safe,
-                    "confidence": round(safe_score, 2),
-                    "target_id": None 
-                }
-                
-                msg_out = String()
-                msg_out.data = json.dumps(result)
+                msg_out.data = json.dumps(final_result)
                 self.publisher.publish(msg_out)
 
         except Exception as e:
             self.get_logger().error(f"Inference Error: {e}")
-            # Optional: trigger garbage collection if we hit a weird memory snag
             import gc
             gc.collect()
             if torch.cuda.is_available():
