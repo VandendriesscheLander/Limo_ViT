@@ -1,6 +1,0 @@
-Videomae kind of works, but bad results, needs a different model most likely.
-
-Moondream is way too large, and doesnt work for the jetson orin nano, maybe try quantization
-
-florence 2 is also pretty big even with fp16, maybe int8 or int4 could work better.
-
