@@ -17,7 +17,8 @@ class ClipBrainNode(Node):
         
         # --- CONFIGURATION ---
         self.model_repo = "google/siglip-base-patch16-224"
-        self.local_model_path = "./src/patrol_bot/models/siglip" # Local save path
+        # Use absolute path for reliable loading regardless of working directory
+        self.local_model_path = "/home/agilex/limo_ros2_ws/src/patrol_bot/models/siglip-base-patch16-224"
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         self.confidence_threshold = 0.45 

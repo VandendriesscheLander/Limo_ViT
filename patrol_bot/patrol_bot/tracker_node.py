@@ -32,7 +32,7 @@ class TrackerNode(Node):
         except Exception as e:
             self.get_logger().error(f"Failed to load YOLO model: {e}")
             # Fallback to standard nano if engine fails, or exit
-            # self.model = YOLO('yolov8n.pt') 
+            # self.model = YOLO('yolo26n.pt') 
 
         # 3. Publishers
         self.tracking_pub = self.create_publisher(String, '/tracked_persons', 10)

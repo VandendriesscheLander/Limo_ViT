@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Patrol Bot
+Comment=Launch the LIMO Pro Patrol Bot System
+Exec=gnome-terminal -- bash -c "/home/agilex/limo_ros2_ws/src/patrol_bot/scripts/launch_patrol.sh; exec bash"
+Icon=applications-robotics
+Terminal=false
+Categories=Development;Robotics;
+StartupNotify=true

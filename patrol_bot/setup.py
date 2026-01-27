@@ -11,7 +11,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', ['launch/patrol.launch.py']),
-        ('share/' + package_name, ['yolov8n.engine']),
+        ('share/' + package_name, ['yolo26n.engine']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
